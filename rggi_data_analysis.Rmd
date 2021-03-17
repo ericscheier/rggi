@@ -1,0 +1,105 @@
+---
+title: "RGGI Data Analysis"
+author: "Eric Scheier"
+date: "3/16/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(tidyverse)
+```
+
+```{r}
+read_then_csv <- function(sheet, path) {
+  pathbase <- path %>%
+    basename() %>%
+    tools::file_path_sans_ext()
+  path %>%
+    read_excel(sheet = sheet, col_names = FALSE, col_types = "text") %>% 
+    write_csv(paste0("data/",sheet, ".csv"))
+}
+
+extract_all_sheets <- function(path){
+  path %>%
+    readxl::excel_sheets() %>%
+    set_names() %>% 
+    map(read_then_csv, path = path)
+}
+
+download_current_egrid <- function(url=NULL){
+  temp <- tempfile()
+  download.file(url,temp,mode="wb", method="libcurl")
+  # mode = 'wb'
+  # path <- temp
+  extract_all_sheets(path=temp)
+}
+
+get_state_egrid <- function(year=2019){
+  # https://stackoverflow.com/questions/44009924/getting-last-two-digits-from-numeric-in-r
+  year_code <- format(as.Date(sprintf('%d-01-01', year)), '%y')
+  file_pattern <- paste0("*.ST",year_code,".csv") #".*ST[0-9]*.csv"
+  relevant_file_path <- list.files(path="data",pattern=file_pattern,
+                                   full.names=TRUE,ignore.case=TRUE)
+  # if(!file.exists(relevant_file_path)){
+  #   download_current_egrid()
+  # }
+  retry <- TRUE
+  skip_to_line <- 0
+  while(retry){
+    state_egrid <- read_csv(relevant_file_path, skip=skip_to_line)
+    fips_row <- which(apply(state_egrid, 1, function(x) {any(grepl(x, pattern = "FIPS")) }))
+    if(length(fips_row)>0 && fips_row != skip_to_line){
+      skip_to_line <- fips_row
+    } else {
+      retry <- FALSE
+    }
+  }
+  return(state_egrid)
+}
+
+download_historical_egrid <- function(url=NULL){
+  temp <- tempfile()
+  download.file(url,temp)
+  unzip(zipfile=temp,exdir="data")
+  unlink(temp)
+}
+```
+
+```{r}
+historical_data_url <- "https://www.epa.gov/sites/production/files/2020-01/egrid2018_historical_files_since_1996.zip"
+data_url_2018 <- "https://www.epa.gov/sites/production/files/2020-03/egrid2018_data_v2.xlsx"
+data_url_2019 <- "https://www.epa.gov/sites/production/files/2021-02/egrid2019_data.xlsx"
+```
+
+We are interested in understanding the CO2 emissions intensity of electricity generated and consumed in member states of the Regional Greenhouse Gas Initiative (RGGI) before and during their participation in RGGI.
+
+The data for making this assessment is available from the Environmental Protection Agency (EPA) through its Emissions & Generation Resource Integrated Database (eGRID).
+
+```{r}
+if (!dir.exists("data")) {dir.create("data")}
+
+download_current_egrid(url=data_url_2019)
+download_current_egrid(url=data_url_2018)
+download_historical_egrid(url=historical_data_url)
+```
+
+```{r}
+historical_files <- list.files(path="data",
+                               pattern="^egrid.*?_(location|data|aggregation)(|_v2)\\.xls",
+                               full.names=TRUE,ignore.case=TRUE)
+
+lapply(historical_files, extract_all_sheets)
+```
+
+```{r}
+state_files <- list.files(path="data",
+           pattern=".*ST[0-9]*.csv",
+           full.names = TRUE,ignore.case=TRUE)
+```
+
+```{r}
+state_data <- get_state_egrid(year=1999)
+```
+
