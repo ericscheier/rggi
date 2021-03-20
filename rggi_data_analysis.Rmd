@@ -36,12 +36,15 @@ download_current_egrid <- function(url=NULL){
   extract_all_sheets(path=temp)
 }
 
-get_state_egrid <- function(year=2019){
-  # https://stackoverflow.com/questions/44009924/getting-last-two-digits-from-numeric-in-r
-  year_code <- format(as.Date(sprintf('%d-01-01', year)), '%y')
-  file_pattern <- paste0("*.ST",year_code,".csv") #".*ST[0-9]*.csv"
-  relevant_file_path <- list.files(path="data",pattern=file_pattern,
-                                   full.names=TRUE,ignore.case=TRUE)
+get_state_egrid <- function(year=2019, relevant_file_path=NULL){
+  if(is.null(relevant_file_path)){
+    # https://stackoverflow.com/questions/44009924/getting-last-two-digits-from-numeric-in-r
+    year_code <- format(as.Date(sprintf('%d-01-01', year)), '%y')
+    file_pattern <- paste0("*.ST",year_code,".csv") #".*ST[0-9]*.csv"
+    relevant_file_path <- list.files(path="data",pattern=file_pattern,
+                                     full.names=TRUE,ignore.case=TRUE)
+  }
+  message("reading ",relevant_file_path)
   # if(!file.exists(relevant_file_path)){
   #   download_current_egrid()
   # }
@@ -50,12 +53,16 @@ get_state_egrid <- function(year=2019){
   while(retry){
     state_egrid <- read_csv(relevant_file_path, skip=skip_to_line)
     fips_row <- which(apply(state_egrid, 1, function(x) {any(grepl(x, pattern = "FIPS")) }))
+    fips_row <- fips_row[length(fips_row)]
     if(length(fips_row)>0 && fips_row != skip_to_line){
       skip_to_line <- fips_row
     } else {
       retry <- FALSE
     }
   }
+  
+  names(state_egrid) <- sub("\n.*","",names(state_egrid))
+  
   return(state_egrid)
 }
 
@@ -99,7 +106,46 @@ state_files <- list.files(path="data",
            full.names = TRUE,ignore.case=TRUE)
 ```
 
+
+We are interested in the following variables for our analysis:
+
++ PSTATABB: The state abbreviation for easy sorting and viewing
++ YEAR: which year the data was collected by the EPA (we must infer this from the data filenames)
++ STNGENAN: State annual net generation (MWh)
++ STCO2AN: State annual CO2 emissions (tons)
++ STCO2RTA: State average annual CO2 output emission rate (lbs/MWh)
+
 ```{r}
-state_data <- get_state_egrid(year=1999)
+desired_columns <- c("state"="PSTATABB",
+                     "generation_MWh"="STNGENAN",
+                     "emissions_tons"="STCO2AN",
+                     "emission_rate_lbs_per_MWh"="STCO2RTA")
 ```
+
+```{r}
+# function to get the year from the filename
+year_from_file <- function(file_name){
+  current_year <- as.numeric(format(Sys.Date(),"%y"))
+  file_year <- as.numeric(gsub("[^\\d]+", "", file_name, perl=TRUE))
+  full_file_year <- ifelse(file_year>current_year,1900+file_year,2000+file_year)
+  return(full_file_year)
+}
+```
+
+```{r}
+# https://stackoverflow.com/questions/63808658/combining-multiple-csv-files-together-in-an-r-loop
+new_data <- purrr::map_df(state_files, function(x) {
+  mydata <- get_state_egrid(year=NULL,
+                            relevant_file_path = x)
+  mydata <- mydata[,desired_columns]
+  mydata %>%
+    mutate(year = year_from_file(x))
+}) %>% 
+  rename(all_of(desired_columns))
+```
+
+```{r}
+write_csv(new_data,"egrid_selected_data_all_years.csv")
+```
+
 
