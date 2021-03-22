@@ -72,6 +72,17 @@ download_historical_egrid <- function(url=NULL){
   unzip(zipfile=temp,exdir="data")
   unlink(temp)
 }
+
+# function to get the year from the filename
+year_from_file <- function(file_name){
+  current_year <- as.numeric(format(Sys.Date(),"%y"))
+  file_year <- as.numeric(gsub("[^\\d]+", "",
+                               file_name, perl=TRUE))
+  full_file_year <- ifelse(file_year>current_year,
+                           1900+file_year,
+                           2000+file_year)
+  return(full_file_year)
+}
 ```
 
 ```{r}
@@ -84,29 +95,6 @@ We are interested in understanding the CO2 emissions intensity of electricity ge
 
 The data for making this assessment is available from the Environmental Protection Agency (EPA) through its Emissions & Generation Resource Integrated Database (eGRID).
 
-```{r}
-if (!dir.exists("data")) {dir.create("data")}
-
-download_current_egrid(url=data_url_2019)
-download_current_egrid(url=data_url_2018)
-download_historical_egrid(url=historical_data_url)
-```
-
-```{r}
-historical_files <- list.files(path="data",
-                               pattern="^egrid.*?_(location|data|aggregation)(|_v2)\\.xls",
-                               full.names=TRUE,ignore.case=TRUE)
-
-lapply(historical_files, extract_all_sheets)
-```
-
-```{r}
-state_files <- list.files(path="data",
-           pattern=".*ST[0-9]*.csv",
-           full.names = TRUE,ignore.case=TRUE)
-```
-
-
 We are interested in the following variables for our analysis:
 
 + PSTATABB: The state abbreviation for easy sorting and viewing
@@ -116,36 +104,191 @@ We are interested in the following variables for our analysis:
 + STCO2RTA: State average annual CO2 output emission rate (lbs/MWh)
 
 ```{r}
-desired_columns <- c("state"="PSTATABB",
-                     "generation_MWh"="STNGENAN",
-                     "emissions_tons"="STCO2AN",
-                     "emission_rate_lbs_per_MWh"="STCO2RTA")
-```
-
-```{r}
-# function to get the year from the filename
-year_from_file <- function(file_name){
-  current_year <- as.numeric(format(Sys.Date(),"%y"))
-  file_year <- as.numeric(gsub("[^\\d]+", "", file_name, perl=TRUE))
-  full_file_year <- ifelse(file_year>current_year,1900+file_year,2000+file_year)
-  return(full_file_year)
+if(!file.exists("egrid_selected_data_all_years.csv")){
+  if (!dir.exists("data")) {dir.create("data")}
+  
+  download_current_egrid(url=data_url_2019)
+  download_current_egrid(url=data_url_2018)
+  download_historical_egrid(url=historical_data_url)
+  
+  historical_files <- list.files(path="data",
+                                 pattern="^egrid.*?_(location|data|aggregation)(|_v2)\\.xls",
+                                 full.names=TRUE,ignore.case=TRUE)
+  
+  lapply(historical_files, extract_all_sheets)
+  
+  state_files <- list.files(path="data",
+             pattern=".*ST[0-9]*.csv",
+             full.names = TRUE,ignore.case=TRUE)
+  
+  desired_columns <- c("state"="PSTATABB",
+                       "generation_MWh"="STNGENAN",
+                       "emissions_tons"="STCO2AN",
+                       "emission_rate_lbs_per_MWh"="STCO2RTA")
+  
+  # https://stackoverflow.com/questions/63808658/combining-multiple-csv-files-together-in-an-r-loop
+  new_data <- purrr::map_df(state_files, function(x) {
+    mydata <- get_state_egrid(year=NULL,
+                              relevant_file_path = x)
+    mydata <- mydata[,desired_columns]
+    mydata %>%
+      mutate(year = year_from_file(x))
+  }) %>% 
+    rename(all_of(desired_columns))
+  
+  write_csv(new_data,"egrid_selected_data_all_years.csv")
 }
 ```
 
 ```{r}
-# https://stackoverflow.com/questions/63808658/combining-multiple-csv-files-together-in-an-r-loop
-new_data <- purrr::map_df(state_files, function(x) {
-  mydata <- get_state_egrid(year=NULL,
-                            relevant_file_path = x)
-  mydata <- mydata[,desired_columns]
-  mydata %>%
-    mutate(year = year_from_file(x))
-}) %>% 
-  rename(all_of(desired_columns))
+egrid_data <- read_csv("egrid_selected_data_all_years.csv")
 ```
 
 ```{r}
-write_csv(new_data,"egrid_selected_data_all_years.csv")
+rggi_states <- c("CT",
+                 "DE",
+                 "ME",
+                 "MD",
+                 "MA",
+                 "NH",
+                 "NY",
+                 "RI",
+                 "VT")
+rggi_initiation_year <- 2009
+
+control_periods <- data.frame(list(
+  "Period"=as.character(c(5,4,3,2,1)),
+  "Start"=c(2021,2018,2015,2012,2009),
+  "End"=c(2023,2020,2017,2014,2011)))
+
+states_of_interest <- "NC" #c("NC","CA")
+```
+
+`r rggi_states` have been members of RGGI since its initiation in `r rggi_initiation_year`. We are interested to compare the performance of all other states with the RGGI members and our state of interest: `r states_of_interest`
+
+```{r}
+egrid_data$is_rggi <- ifelse(egrid_data$state %in% rggi_states, "RGGI", "Other")
+
+egrid_data$is_rggi <- ifelse(egrid_data$state %in% states_of_interest, egrid_data$state, egrid_data$is_rggi)
+
+egrid_data$is_rggi <- forcats::as_factor(egrid_data$is_rggi)
 ```
 
 
+```{r}
+grouped_emissions_rates <- egrid_data %>% 
+  group_by(is_rggi,year) %>% 
+  summarise(emissions_rate=weighted.mean(
+    x=emission_rate_lbs_per_MWh,
+    w=generation_MWh)) %>% ungroup()
+
+grouped_emissions_rates$during_rggi <- ifelse(
+  grouped_emissions_rates$year<min(control_periods$Start),
+  "Before",
+  "During")
+
+start_year <- grouped_emissions_rates[grouped_emissions_rates$year==min(control_periods$Start),]
+start_year$during_rggi <- "Before"
+graph_grouped_emissions_rates <- rbind(grouped_emissions_rates, start_year)
+```
+
+
+```{r}
+# title
+# y axis label
+# x axis label
+# x axis ticks
+# Period legend title
+# period legend labels
+# is_rggi legend label
+# remove out of scope rggi period
+
+ggplot(data=graph_grouped_emissions_rates, aes(x=year,
+                            y=emissions_rate,
+                            color=is_rggi)) + 
+  geom_rect(data = control_periods,
+            aes(xmin = Start,
+                xmax = End+1,
+                ymin = -Inf,
+                ymax = Inf,
+                fill = Period
+                ),
+            alpha = 0.25,
+            color = "gray", size = .5,
+            inherit.aes=FALSE) + 
+  geom_line(inherit.aes = TRUE, 
+            linetype="dotted",
+            size=0.75) + 
+  geom_point(size=FALSE) +
+  geom_smooth(aes(group=interaction(is_rggi,during_rggi)), 
+              formula=y~x,
+              method = "lm", 
+              fill = NA, 
+              size=0.5,
+              linetype="solid") +
+  # geom_smooth(aes(group=is_rggi),
+  #             fill=NA,
+  #             method="lm") +
+  theme_minimal() + 
+  coord_cartesian(
+    xlim=c(
+      min(egrid_data$year),
+      max(egrid_data$year)))
+```
+
+```{r}
+final_year_before_rggi <- max(
+  unique(
+    grouped_emissions_rates$year[
+      grouped_emissions_rates$year<min(control_periods$Start)
+      ]))
+
+start_rggi_rate <- as.numeric(grouped_emissions_rates[grouped_emissions_rates$year==
+                                       final_year_before_rggi & 
+                          grouped_emissions_rates$is_rggi=="RGGI",
+                        "emissions_rate"])
+end_rggi_rate <- as.numeric(grouped_emissions_rates[grouped_emissions_rates$year==
+                                       max(grouped_emissions_rates$year) & 
+                          grouped_emissions_rates$is_rggi=="RGGI",
+                        "emissions_rate"])
+
+rggi_change <- (start_rggi_rate - end_rggi_rate)/start_rggi_rate
+
+
+start_soi_rate <- as.numeric(grouped_emissions_rates[grouped_emissions_rates$year==
+                                       final_year_before_rggi & 
+                          grouped_emissions_rates$is_rggi %in% states_of_interest,
+                        "emissions_rate"])
+end_soi_rate <- as.numeric(grouped_emissions_rates[grouped_emissions_rates$year==
+                                       max(grouped_emissions_rates$year) & 
+                          grouped_emissions_rates$is_rggi %in% states_of_interest,
+                        "emissions_rate"])
+
+soi_change <- (start_soi_rate - end_soi_rate)/start_soi_rate
+
+start_other_rate <- as.numeric(grouped_emissions_rates[grouped_emissions_rates$year==
+                                       final_year_before_rggi & 
+                          grouped_emissions_rates$is_rggi=="Other",
+                        "emissions_rate"])
+end_other_rate <- as.numeric(grouped_emissions_rates[grouped_emissions_rates$year==
+                                       max(grouped_emissions_rates$year) & 
+                          grouped_emissions_rates$is_rggi=="Other",
+                        "emissions_rate"])
+
+other_change <- (start_other_rate - end_other_rate)/start_other_rate
+```
+
+
+Whereas, the carbon dioxide emissions rate of the Regional Greenhouse Gas Initative (RGGI) member states' electricity generation as measured by the Environmental Protection Agency's Emissions & Generation Resource Integrated Database (EPA eGRID) in `r final_year_before_rggi`, the final year of measurement prior to the start of the first RGGI control period in `r rggi_initiation_year`, was `r round(start_rggi_rate,0)` pounds of carbon dioxide per megawatt-hour of electricity.
+
+Whereas, the carbon dioxide emissions rate of North Carolina's electricity generation as measured by EPA eGRID in the year `r final_year_before_rggi` was `r round(start_soi_rate,0)` pounds of carbon dioxide per megawatt-hour of electricity.
+
+Whereas, the carbon dioxide emissions rate of the RGGI member states' electricity generation as most recently measured by EPA eGRID in the year `r max(grouped_emissions_rates$year)` is `r round(end_rggi_rate,0)` pounds of carbon dioxide per megawatt-hour of electricity.
+
+Whereas, the carbon dioxide emissions rate of North Carolina's electricity generation as most recently measured by EPA eGRID in the year `r max(grouped_emissions_rates$year)` is `r round(end_soi_rate,0)` pounds of carbon dioxide per megawatt-hour of electricity.
+
+Whereas, according to EPA eGRID, the carbon dioxide emissions rate of RGGI member states' electricity generation has `r ifelse(rggi_change<1,"decreased","increased")` by `r 100*abs(round(rggi_change,2))`% since their initiation of the program in `r rggi_initiation_year`.
+
+Whereas, according to EPA eGRID, the carbon dioxide emissions rate of North Carolina's electricity generation has `r ifelse(soi_change<1,"decreased","increased")` by `r 100*abs(round(soi_change,2))`% since `r rggi_initiation_year`.
+
+Whereas, according to EPA eGRID, the carbon dioxide emissions rate of North Carolina's electricity generation is `r round(end_soi_rate/end_rggi_rate,1)` times `r ifelse(end_soi_rate>end_rggi_rate,"higher than ","")`that of the RGGI member states.
